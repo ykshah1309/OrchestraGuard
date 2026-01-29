@@ -1,23 +1,27 @@
 """
-Database Service - Singleton Pattern for Supabase/PostgreSQL interaction
+FIXED: Database service with exponential backoff retry logic
 """
 import os
+import time
 from typing import List, Dict, Any, Optional
 from datetime import datetime, timedelta
 import json
-from supabase import create_client, Client
 from functools import wraps
 import asyncio
-from threading import Lock
+import threading
+from supabase import create_client, Client
+import logging
+
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 class DatabaseService:
-    """
-    Singleton database client with connection pooling management
-    High-performance Supabase/PostgreSQL interaction
-    """
+    """Singleton database client with exponential backoff retry"""
     
     _instance = None
-    _lock = Lock()
+    _lock = threading.Lock()
+    _max_retries = 5
+    _base_delay = 1.0  # seconds
     
     def __init__(self):
         if DatabaseService._instance is not None:
@@ -25,37 +29,80 @@ class DatabaseService:
         
         self.supabase: Client = None
         self.is_initialized = False
-        self._initialize()
+        self.connection_attempts = 0
+        self.last_connection_time = None
+        self._initialize_with_retry()
+    
+    def _initialize_with_retry(self):
+        """Initialize with exponential backoff retry"""
+        for attempt in range(self._max_retries):
+            try:
+                self._initialize()
+                self.is_initialized = True
+                self.connection_attempts = attempt + 1
+                self.last_connection_time = datetime.utcnow()
+                logger.info(f"✅ DatabaseService connected (attempt {attempt + 1})")
+                return
+                
+            except Exception as e:
+                if attempt == self._max_retries - 1:
+                    logger.error(f"❌ DatabaseService failed after {self._max_retries} attempts: {e}")
+                    raise
+                
+                # Exponential backoff
+                delay = self._base_delay * (2 ** attempt)
+                logger.warning(f"⚠️ Database connection failed (attempt {attempt + 1}): {e}. Retrying in {delay}s")
+                time.sleep(delay)
+    
+    def _initialize(self):
+        """Initialize Supabase client"""
+        supabase_url = os.getenv("SUPABASE_URL")
+        supabase_key = os.getenv("SUPABASE_KEY")
+        
+        if not supabase_url or not supabase_key:
+            raise ValueError("SUPABASE_URL and SUPABASE_KEY must be set in .env")
+        
+        self.supabase = create_client(supabase_url, supabase_key)
+        
+        # Test connection with a simple query
+        self.supabase.table("policies").select("count", count="exact").limit(1).execute()
     
     @staticmethod
     def get_instance():
-        """Get singleton instance"""
+        """Get singleton instance with lazy initialization"""
         if DatabaseService._instance is None:
             with DatabaseService._lock:
                 if DatabaseService._instance is None:
                     DatabaseService._instance = DatabaseService()
         return DatabaseService._instance
     
-    def _initialize(self):
-        """Initialize Supabase client"""
+    async def health_check(self) -> Dict[str, Any]:
+        """Health check with reconnection logic"""
         try:
-            supabase_url = os.getenv("SUPABASE_URL")
-            supabase_key = os.getenv("SUPABASE_KEY")
-            
-            if not supabase_url or not supabase_key:
-                raise ValueError("Supabase credentials not configured")
-            
-            self.supabase = create_client(supabase_url, supabase_key)
-            self.is_initialized = True
-            
-            # Test connection
-            self.supabase.table("policies").select("count", count="exact").limit(1).execute()
-            
-            print("✅ DatabaseService initialized successfully")
-            
+            # Try a simple query
+            response = self.supabase.table("policies").select("count", count="exact").limit(1).execute()
+            return {
+                "status": "healthy",
+                "connection_attempts": self.connection_attempts,
+                "last_connection": self.last_connection_time.isoformat() if self.last_connection_time else None,
+                "tables_accessible": True
+            }
         except Exception as e:
-            print(f"❌ DatabaseService initialization failed: {e}")
-            raise
+            logger.error(f"Health check failed: {e}")
+            # Try to reconnect
+            try:
+                self._initialize_with_retry()
+                return {
+                    "status": "reconnected",
+                    "connection_attempts": self.connection_attempts,
+                    "last_connection": self.last_connection_time.isoformat()
+                }
+            except Exception as reconn_error:
+                return {
+                    "status": "unhealthy",
+                    "error": str(reconn_error),
+                    "connection_attempts": self.connection_attempts
+                }
     
     async def log_audit(
         self,
@@ -64,126 +111,127 @@ class DatabaseService:
         target_tool: str,
         decision: str,
         rationale: str,
-        metadata: Optional[Dict] = None
+        metadata: Optional[Dict] = None,
+        applied_rules: Optional[List[str]] = None
     ):
-        """Log decision to audit_logs table"""
-        try:
-            data = {
-                "action_id": action_id,
-                "source_agent": source_agent,
-                "target_tool": target_tool,
-                "decision": decision,
-                "rationale": rationale,
-                "metadata": metadata or {},
-                "created_at": datetime.utcnow().isoformat()
-            }
-            
-            response = self.supabase.table("audit_logs").insert(data).execute()
-            return response.data[0] if response.data else None
-            
-        except Exception as e:
-            print(f"Error logging audit: {e}")
-            # Don't raise - audit failures shouldn't break the flow
-            return None
+        """Log decision to audit_logs with retry"""
+        return await self._with_retry(
+            self._log_audit_internal,
+            action_id, source_agent, target_tool, decision, rationale, metadata, applied_rules
+        )
     
-    async def create_policy(
+    async def _log_audit_internal(
         self,
-        name: str,
-        rule_id: str,
-        description: str,
-        target_tool_regex: str,
-        condition_logic: str,
-        severity: str,
-        action_on_violation: str
+        action_id: str,
+        source_agent: str,
+        target_tool: str,
+        decision: str,
+        rationale: str,
+        metadata: Optional[Dict] = None,
+        applied_rules: Optional[List[str]] = None
     ):
-        """Create new policy rule"""
-        try:
-            # Create JSONB rules object
-            rules_json = {
-                "rule_id": rule_id,
-                "description": description,
-                "target_tool_regex": target_tool_regex,
-                "condition_logic": condition_logic,
-                "severity": severity,
-                "action_on_violation": action_on_violation
+        """Internal audit logging method"""
+        data = {
+            "action_id": action_id,
+            "source_agent": source_agent,
+            "target_tool": target_tool,
+            "decision": decision,
+            "rationale": rationale,
+            "metadata": metadata or {},
+            "applied_rules": applied_rules or [],
+            "created_at": datetime.utcnow().isoformat()
+        }
+        
+        response = self.supabase.table("audit_logs").insert(data).execute()
+        return response.data[0] if response.data else None
+    
+    async def get_active_policies(self) -> List[Dict]:
+        """Get all active policies with retry"""
+        return await self._with_retry(self._get_active_policies_internal)
+    
+    async def _get_active_policies_internal(self) -> List[Dict]:
+        """Internal method to get active policies"""
+        response = self.supabase.table("policies") \
+            .select("*") \
+            .eq("is_active", True) \
+            .execute()
+        return response.data
+    
+    async def create_policy(self, policy_data: Dict) -> Dict:
+        """Create new policy with retry"""
+        return await self._with_retry(self._create_policy_internal, policy_data)
+    
+    async def _create_policy_internal(self, policy_data: Dict) -> Dict:
+        """Internal method to create policy"""
+        response = self.supabase.table("policies").insert(policy_data).execute()
+        return response.data[0] if response.data else None
+    
+    async def check_policy_conflicts(self, new_rule: Dict) -> List[Dict]:
+        """Check for conflicts with existing policies"""
+        return await self._with_retry(self._check_policy_conflicts_internal, new_rule)
+    
+    async def _check_policy_conflicts_internal(self, new_rule: Dict) -> List[Dict]:
+        """Internal method to check policy conflicts"""
+        # Get all active policies with similar target tools
+        target_regex = new_rule.get("target_tool_regex", "")
+        
+        # Use Supabase's JSONB querying
+        response = self.supabase.rpc(
+            'check_policy_conflicts',
+            {
+                'new_target_regex': target_regex,
+                'new_severity': new_rule.get("severity", "MEDIUM")
             }
-            
-            data = {
-                "name": name,
-                "rules": rules_json,
-                "is_active": True,
-                "created_at": datetime.utcnow().isoformat()
-            }
-            
-            response = self.supabase.table("policies").insert(data).execute()
-            return response.data[0] if response.data else None
-            
-        except Exception as e:
-            print(f"Error creating policy: {e}")
-            raise
+        ).execute()
+        
+        return response.data
     
-    async def get_all_policies(self, active_only: bool = True) -> List[Dict]:
-        """Retrieve all policies (with GIN index optimization)"""
-        try:
-            query = self.supabase.table("policies").select("*")
-            
-            if active_only:
-                query = query.eq("is_active", True)
-            
-            response = query.execute()
-            return response.data
-            
-        except Exception as e:
-            print(f"Error fetching policies: {e}")
-            return []
+    async def _with_retry(self, func, *args, **kwargs):
+        """Decorator pattern for retrying database operations"""
+        for attempt in range(3):  # 3 retries for operations
+            try:
+                return await func(*args, **kwargs)
+            except Exception as e:
+                if attempt == 2:  # Last attempt
+                    logger.error(f"Database operation failed after 3 attempts: {e}")
+                    raise
+                
+                # Exponential backoff
+                delay = 0.5 * (2 ** attempt)
+                logger.warning(f"Database operation failed (attempt {attempt + 1}): {e}. Retrying in {delay}s")
+                await asyncio.sleep(delay)
     
-    async def get_policies_for_tool(self, target_tool: str) -> List[Dict]:
-        """
-        Get policies for specific tool using JSONB query
-        Leverages GIN index for performance
-        """
+    async def get_metrics(self) -> Dict[str, Any]:
+        """Get system metrics with optimized queries"""
         try:
-            # Use Supabase's JSONB query capabilities
-            response = self.supabase.rpc(
-                'get_policies_by_tool',
-                {'tool_pattern': f'%{target_tool}%'}
-            ).execute()
-            
-            return response.data
-            
-        except Exception as e:
-            print(f"Error querying policies for tool: {e}")
-            # Fallback to application-side filtering
-            all_policies = await self.get_all_policies()
-            return [
-                p for p in all_policies 
-                if target_tool in p.get('rules', {}).get('target_tool_regex', '')
-            ]
-    
-    async def get_audit_count(self) -> int:
-        """Get total number of audit logs"""
-        try:
-            response = self.supabase.table("audit_logs").select("count", count="exact").execute()
-            return response.count
-        except:
-            return 0
-    
-    async def get_decision_rate(self, decision_type: str) -> float:
-        """Get rate of specific decision type"""
-        try:
-            total = await self.get_audit_count()
-            if total == 0:
-                return 0.0
-            
-            response = self.supabase.table("audit_logs") \
+            # Get total count
+            total_response = self.supabase.table("audit_logs") \
                 .select("count", count="exact") \
-                .eq("decision", decision_type) \
                 .execute()
+            total = total_response.count
             
-            return response.count / total
+            # Get decision breakdown (single query)
+            response = self.supabase.rpc('get_decision_breakdown').execute()
             
-        except:
-            return 0.0
+            if response.data:
+                breakdown = response.data[0]
+                return {
+                    "total_decisions": total,
+                    "allow_count": breakdown.get("allow_count", 0),
+                    "block_count": breakdown.get("block_count", 0),
+                    "flag_count": breakdown.get("flag_count", 0),
+                    "allow_rate": breakdown.get("allow_count", 0) / total if total > 0 else 0,
+                    "block_rate": breakdown.get("block_count", 0) / total if total > 0 else 0,
+                    "flag_rate": breakdown.get("flag_count", 0) / total if total > 0 else 0,
+                    "active_policies": await self.get_active_policy_count(),
+                    "last_decision_time": await self.get_last_decision_time()
+                }
+            
+            return {"total_decisions": total, "active_policies": 0}
+            
+        except Exception as e:
+            logger.error(f"Error getting metrics: {e}")
+            return {"error": str(e)}
     
     async def get_active_policy_count(self) -> int:
         """Count active policies"""
@@ -192,46 +240,21 @@ class DatabaseService:
                 .select("count", count="exact") \
                 .eq("is_active", True) \
                 .execute()
-            
-            return response.count
+            return response.count or 0
         except:
             return 0
     
-    async def get_recent_audits(self, limit: int = 100) -> List[Dict]:
-        """Get recent audit logs with indexed query"""
+    async def get_last_decision_time(self) -> Optional[str]:
+        """Get timestamp of last decision"""
         try:
             response = self.supabase.table("audit_logs") \
-                .select("*") \
+                .select("created_at") \
                 .order("created_at", desc=True) \
-                .limit(limit) \
+                .limit(1) \
                 .execute()
             
-            return response.data
-            
-        except Exception as e:
-            print(f"Error fetching recent audits: {e}")
-            return []
-    
-    def close(self):
-        """Close database connections"""
-        # Supabase client doesn't have explicit close method
-        self.supabase = None
-        self.is_initialized = False
-
-# Decorator for database operations
-def with_db_retry(max_retries=3):
-    """Decorator for retrying database operations"""
-    def decorator(func):
-        @wraps(func)
-        async def wrapper(*args, **kwargs):
-            last_error = None
-            for attempt in range(max_retries):
-                try:
-                    return await func(*args, **kwargs)
-                except Exception as e:
-                    last_error = e
-                    if attempt < max_retries - 1:
-                        await asyncio.sleep(1 * (attempt + 1))
-            raise last_error
-        return wrapper
-    return decorator
+            if response.data:
+                return response.data[0]["created_at"]
+            return None
+        except:
+            return None

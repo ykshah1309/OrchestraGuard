@@ -1,25 +1,25 @@
-# Web Framework
+# FastAPI & Web
 fastapi==0.109.0
 uvicorn[standard]==0.27.0
+httpx==0.26.0
+python-multipart==0.0.6
 
-# Database & Auth
+# Database
 supabase==2.3.0
+psycopg2-binary==2.9.9
+
+# Authentication
 python-jose[cryptography]==3.3.0
 passlib[bcrypt]==1.7.4
 
-# AI & LLM (Conflict-free versions)
+# LLM Providers
 ibm-watsonx-ai==1.0.0
-openai==1.10.0
+openai==1.12.0
+
+# Data Validation
 pydantic==2.5.3
 pydantic-settings==2.1.0
 
 # Utilities
-httpx==0.26.0
-python-multipart==0.0.6
-websockets==12.0
-
-# Optional for frontend
-react==18.2.0
-zustand==4.4.7
-tailwindcss==3.3.0
-@supabase/supabase-js==2.38.4
+python-dotenv==1.0.0
+asyncio==3.4.3
