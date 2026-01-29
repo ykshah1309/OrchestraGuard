@@ -1,9 +1,11 @@
 /**
- * Zustand store for OrchestraGuard Frontend
- * Lightweight, non-boilerplate state management
+ * FIXED: Zustand store with configurable API paths
  */
 import { create } from 'zustand';
 import { supabase } from '../lib/supabase';
+
+// Get API base URL from environment variable
+const API_BASE_URL = import.meta.env.VITE_BACKEND_URL || 'http://localhost:8000';
 
 const useStore = create((set, get) => ({
   // State
@@ -55,12 +57,25 @@ const useStore = create((set, get) => ({
 
   fetchMetrics: async () => {
     try {
-      // Fetch metrics from backend API
-      const response = await fetch('/api/metrics');
-      const metrics = await response.json();
-      set({ metrics });
+      // FIXED: Use configurable API base URL
+      const response = await fetch(`${API_BASE_URL}/metrics`, {
+        headers: {
+          'Authorization': `Bearer ${localStorage.getItem('token') || ''}`
+        }
+      });
+      
+      if (!response.ok) {
+        throw new Error(`Failed to fetch metrics: ${response.status}`);
+      }
+      
+      const data = await response.json();
+      set({ metrics: data.metrics });
     } catch (error) {
       console.error('Failed to fetch metrics:', error);
+      // Fallback to direct database query
+      const { getSystemMetrics } = await import('../lib/supabase');
+      const data = await getSystemMetrics();
+      set({ metrics: data.metrics });
     }
   },
 
@@ -85,9 +100,10 @@ const useStore = create((set, get) => ({
           get().updateMetricsOnNewLog(payload.new);
         }
       )
-      .subscribe();
+      .subscribe((status) => {
+        set({ realtimeConnected: status === 'SUBSCRIBED' });
+      });
 
-    set({ realtimeConnected: true });
     return () => {
       subscription.unsubscribe();
       set({ realtimeConnected: false });
@@ -105,12 +121,15 @@ const useStore = create((set, get) => ({
       switch (decision) {
         case 'ALLOW':
           newMetrics.allowRate = ((state.metrics.allowRate * state.metrics.totalDecisions) + 1) / total;
+          newMetrics.allowCount = (state.metrics.allowCount || 0) + 1;
           break;
         case 'BLOCK':
           newMetrics.blockRate = ((state.metrics.blockRate * state.metrics.totalDecisions) + 1) / total;
+          newMetrics.blockCount = (state.metrics.blockCount || 0) + 1;
           break;
         case 'FLAG':
           newMetrics.flagRate = ((state.metrics.flagRate * state.metrics.totalDecisions) + 1) / total;
+          newMetrics.flagCount = (state.metrics.flagCount || 0) + 1;
           break;
       }
       
@@ -121,21 +140,33 @@ const useStore = create((set, get) => ({
   createPolicy: async (policyData) => {
     set({ isLoading: true });
     try {
-      const response = await fetch('/api/policies', {
+      // FIXED: Use configurable API base URL
+      const response = await fetch(`${API_BASE_URL}/policy/analyze`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${localStorage.getItem('token') || ''}`
+        },
         body: JSON.stringify(policyData),
       });
 
-      if (!response.ok) throw new Error('Failed to create policy');
+      if (!response.ok) {
+        const errorData = await response.json();
+        throw new Error(errorData.detail || 'Failed to create policy');
+      }
       
-      // Refresh policies
-      await get().fetchPolicies();
+      const result = await response.json();
+      
+      // Refresh policies after successful creation
+      if (result.status === 'success') {
+        await get().fetchPolicies();
+      }
+      
       set({ isLoading: false });
-      return true;
+      return result;
     } catch (error) {
       set({ error: error.message, isLoading: false });
-      return false;
+      return { status: 'error', message: error.message };
     }
   },
 
@@ -155,6 +186,33 @@ const useStore = create((set, get) => ({
     } catch (error) {
       set({ error: error.message, isLoading: false });
       return false;
+    }
+  },
+
+  testInterception: async (interceptionData) => {
+    set({ isLoading: true });
+    try {
+      // FIXED: Use configurable API base URL
+      const response = await fetch(`${API_BASE_URL}/intercept`, {
+        method: 'POST',
+        headers: { 
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${localStorage.getItem('token') || ''}`
+        },
+        body: JSON.stringify(interceptionData),
+      });
+
+      if (!response.ok) {
+        const errorData = await response.json();
+        throw new Error(errorData.detail || 'Failed to test interception');
+      }
+      
+      const result = await response.json();
+      set({ isLoading: false });
+      return result;
+    } catch (error) {
+      set({ error: error.message, isLoading: false });
+      return { error: error.message };
     }
   },
 

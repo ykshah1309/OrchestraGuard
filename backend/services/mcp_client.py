@@ -1,13 +1,17 @@
 """
-NEW: Model Context Protocol Client - Connects to external tools for context
+FIXED: Added missing hashlib import and improved error handling
 """
 import httpx
 import json
+import hashlib  # FIXED: Added missing import
 from typing import Dict, Any, List, Optional
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 import asyncio
 from enum import Enum
+import logging
+
+logger = logging.getLogger(__name__)
 
 class ContextType(Enum):
     """Types of context that can be fetched"""
@@ -104,6 +108,7 @@ class MCPClient:
         
         if cached and (datetime.utcnow() - cached.fetched_at).seconds < 60:
             # Return cached result if less than 60 seconds old
+            logger.debug(f"Returning cached result for {cache_key}")
             return cached
         
         # Get MCP server config
@@ -113,12 +118,13 @@ class MCPClient:
             server_config = self._detect_tool_config(tool_name)
             if not server_config:
                 # Return empty result for unknown tools
+                logger.warning(f"No MCP server configured for tool: {tool_name}")
                 return MCPContextResult(
                     tool_name=tool_name,
                     context_type=ContextType(context_type),
                     results=[],
                     total_results=0,
-                    metadata={"error": "Tool not configured in MCP"},
+                    metadata={"error": f"Tool '{tool_name}' not configured in MCP", "status": "not_configured"},
                     fetched_at=datetime.utcnow()
                 )
         
@@ -126,6 +132,7 @@ class MCPClient:
             # Build endpoint URL
             endpoint_template = server_config["endpoints"].get(context_type)
             if not endpoint_template:
+                logger.error(f"Context type {context_type} not supported for {tool_name}")
                 raise ValueError(f"Context type {context_type} not supported for {tool_name}")
             
             # Replace placeholders in endpoint
@@ -144,6 +151,7 @@ class MCPClient:
                 "sort": "desc" if context_type == "recent_activity" else "asc"
             }
             
+            logger.info(f"Fetching MCP context from {url}")
             response = await self.http_client.get(url, params=params)
             response.raise_for_status()
             
@@ -155,39 +163,43 @@ class MCPClient:
                 tool_name=tool_name,
                 context_type=ContextType(context_type),
                 results=data.get("items", [])[:max_results],
-                total_results=data.get("total_count", 0),
+                total_results=data.get("total_count", len(data.get("items", []))),
                 metadata={
                     "source": "mcp",
                     "server": server_config["base_url"],
                     "endpoint": endpoint,
-                    "response_time_ms": response.elapsed.total_seconds() * 1000
+                    "response_time_ms": response.elapsed.total_seconds() * 1000,
+                    "status": "success"
                 },
                 fetched_at=datetime.utcnow()
             )
             
             # Cache the result
             self.cache[cache_key] = result
+            logger.debug(f"Cached result for {cache_key}")
             
             return result
             
         except httpx.RequestError as e:
             # Handle network errors
+            logger.error(f"MCP network error for {tool_name}: {e}")
             return MCPContextResult(
                 tool_name=tool_name,
                 context_type=ContextType(context_type),
                 results=[],
                 total_results=0,
-                metadata={"error": f"Network error: {str(e)}"},
+                metadata={"error": f"Network error: {str(e)}", "status": "network_error"},
                 fetched_at=datetime.utcnow()
             )
         except Exception as e:
             # Handle other errors
+            logger.error(f"MCP error for {tool_name}: {e}")
             return MCPContextResult(
                 tool_name=tool_name,
                 context_type=ContextType(context_type),
                 results=[],
                 total_results=0,
-                metadata={"error": str(e)},
+                metadata={"error": str(e), "status": "error"},
                 fetched_at=datetime.utcnow()
             )
     
@@ -200,6 +212,7 @@ class MCPClient:
         """Create cache key from request parameters"""
         # Sort arguments to ensure consistent keys
         sorted_args = json.dumps(tool_arguments, sort_keys=True)
+        # FIXED: Now hashlib is imported
         return f"{tool_name}:{context_type}:{hashlib.md5(sorted_args.encode()).hexdigest()}"
     
     def _detect_tool_config(self, tool_name: str) -> Optional[Dict]:
@@ -244,12 +257,13 @@ class MCPClient:
             for i, result in enumerate(fetched_results):
                 context_key = contexts[i].get("key", f"context_{i}")
                 if isinstance(result, Exception):
+                    logger.error(f"Error fetching context {context_key}: {result}")
                     results[context_key] = MCPContextResult(
                         tool_name=contexts[i]["tool_name"],
                         context_type=ContextType(contexts[i].get("context_type", "recent_activity")),
                         results=[],
                         total_results=0,
-                        metadata={"error": str(result)},
+                        metadata={"error": str(result), "status": "error"},
                         fetched_at=datetime.utcnow()
                     )
                 else:
@@ -272,14 +286,16 @@ class MCPClient:
         """Clear the cache, optionally only entries older than X seconds"""
         if older_than:
             cutoff = datetime.utcnow() - timedelta(seconds=older_than)
-            self.cache = {
-                k: v for k, v in self.cache.items()
-                if v.fetched_at > cutoff
-            }
+            old_keys = [k for k, v in self.cache.items() if v.fetched_at <= cutoff]
+            for key in old_keys:
+                del self.cache[key]
+            logger.info(f"Cleared {len(old_keys)} old cache entries")
         else:
             self.cache.clear()
+            logger.info("Cleared all cache entries")
     
     async def close(self):
         """Close HTTP client"""
         if self.http_client:
             await self.http_client.aclose()
+            logger.info("MCPClient HTTP client closed")

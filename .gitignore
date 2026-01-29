@@ -1,4 +1,37 @@
+# --- General ---
+.DS_Store
 .env
-migrations/
+.env.local
+.vscode/
+
+# --- Python ---
 __pycache__/
 *.pyc
+*.pyo
+*.pyd
+.pytest_cache/
+venv/
+.venv/
+pip-log.txt
+pip-delete-this-file.txt
+htmlcov/
+.tox/
+.mypy_cache/
+.ruff_cache/
+
+# --- Node/Frontend ---
+node_modules/
+dist/
+build/
+npm-debug.log
+yarn-error.log
+package-lock.json
+# Vite/React specific
+.vite/
+
+# --- Database / Docker ---
+migrations/
+*.sqlite
+*.db
+# Docker
+.dockerignore
