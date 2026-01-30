@@ -1,7 +1,7 @@
 # FastAPI & Web
 fastapi==0.109.0
 uvicorn[standard]==0.27.0
-httpx==0.26.0
+httpx==0.24.1
 python-multipart==0.0.6
 
 # Database
@@ -12,8 +12,7 @@ psycopg2-binary==2.9.9
 python-jose[cryptography]==3.3.0
 passlib[bcrypt]==1.7.4
 
-# LLM Providers
-ibm-watsonx-ai==1.0.0
+# LLM Providers - OpenAI compatible (works with LM Studio)
 openai==1.12.0
 
 # Data Validation
@@ -22,4 +21,3 @@ pydantic-settings==2.1.0
 
 # Utilities
 python-dotenv==1.0.0
-asyncio==3.4.3
