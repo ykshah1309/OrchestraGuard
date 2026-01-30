@@ -8,7 +8,7 @@ import {
   AlertTriangle, 
   Clock, 
   User, 
-  Tool, 
+  Wrench, 
   Filter,
   ChevronDown,
   ChevronUp,
@@ -217,7 +217,7 @@ const AuditStream = ({ limit = 20, showFilters = false }) => {
                 Target Tool
               </label>
               <div className="relative">
-                <Tool className="absolute left-3 top-2.5 h-4 w-4 text-gray-400" />
+                <Wrench className="absolute left-3 top-2.5 h-4 w-4 text-gray-400" />
                 <input
                   type="text"
                   value={filters.targetTool}
@@ -276,214 +276,120 @@ const AuditStream = ({ limit = 20, showFilters = false }) => {
               </div>
             </div>
           </div>
-          
-          {/* Active filters indicator */}
-          {(filters.decision !== 'all' || filters.sourceAgent || filters.targetTool || filters.search || filters.startDate || filters.endDate) && (
-            <div className="mt-4 flex items-center space-x-2 text-sm text-gray-600">
-              <span>Active filters:</span>
-              {filters.decision !== 'all' && (
-                <span className="px-2 py-1 bg-blue-100 text-blue-800 rounded-full text-xs">
-                  Decision: {filters.decision}
-                </span>
-              )}
-              {filters.sourceAgent && (
-                <span className="px-2 py-1 bg-blue-100 text-blue-800 rounded-full text-xs">
-                  Agent: {filters.sourceAgent}
-                </span>
-              )}
-              {filters.search && (
-                <span className="px-2 py-1 bg-blue-100 text-blue-800 rounded-full text-xs">
-                  Search: {filters.search}
-                </span>
-              )}
-            </div>
-          )}
         </div>
       )}
 
-      {/* Logs Count */}
-      <div className="flex items-center justify-between">
-        <div className="text-sm text-gray-600">
-          Showing {filteredLogs.length} of {auditLogs.length} audit logs
-        </div>
-        <button
-          onClick={() => fetchAuditLogs(limit)}
-          className="text-sm text-blue-600 hover:text-blue-800 font-medium"
-        >
-          Refresh
-        </button>
-      </div>
-
-      {/* Audit Logs List */}
-      <div className="space-y-3">
-        {filteredLogs.length === 0 ? (
-          <div className="text-center py-12">
-            <div className="text-gray-400 mb-4">
-              {auditLogs.length === 0 ? (
-                <>
-                  <div className="text-6xl mb-4">📊</div>
-                  <p className="text-lg font-medium text-gray-900 mb-2">No audit logs yet</p>
-                  <p className="text-gray-600">Intercept some actions to see them appear here in real-time.</p>
-                </>
+      {/* Log Feed */}
+      <div className="bg-white rounded-lg border border-gray-200 overflow-hidden">
+        <div className="overflow-x-auto">
+          <table className="min-w-full divide-y divide-gray-200">
+            <thead className="bg-gray-50">
+              <tr>
+                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Status</th>
+                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Agent</th>
+                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Tool</th>
+                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Rationale</th>
+                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Time</th>
+                <th className="px-6 py-3 text-right text-xs font-medium text-gray-500 uppercase tracking-wider">Details</th>
+              </tr>
+            </thead>
+            <tbody className="bg-white divide-y divide-gray-200">
+              {filteredLogs.length === 0 ? (
+                <tr>
+                  <td colSpan="6" className="px-6 py-12 text-center text-gray-500">
+                    No audit logs found matching your criteria.
+                  </td>
+                </tr>
               ) : (
-                <>
-                  <div className="text-6xl mb-4">🔍</div>
-                  <p className="text-lg font-medium text-gray-900 mb-2">No matching logs</p>
-                  <p className="text-gray-600">Try adjusting your filters to see more results.</p>
-                </>
-              )}
-            </div>
-          </div>
-        ) : (
-          filteredLogs.map((log) => (
-            <div
-              key={log.id}
-              className={`bg-white border rounded-lg transition-all duration-200 hover:shadow-md ${
-                expandedLogId === log.id ? 'border-blue-300 shadow-sm' : 'border-gray-200'
-              }`}
-            >
-              {/* Log Header */}
-              <div
-                className="p-4 cursor-pointer"
-                onClick={() => setExpandedLogId(expandedLogId === log.id ? null : log.id)}
-              >
-                <div className="flex items-start justify-between">
-                  <div className="flex-1">
-                    <div className="flex items-center space-x-3 mb-2">
-                      {getDecisionIcon(log.decision)}
-                      <div className={`px-2 py-1 rounded-full text-xs font-medium ${getDecisionColor(log.decision)}`}>
-                        {log.decision}
-                      </div>
-                      <div className="text-sm text-gray-500">
-                        <span className="font-medium">{log.source_agent}</span>
-                        <span className="mx-2">→</span>
-                        <span className="font-medium">{log.target_tool}</span>
-                      </div>
-                    </div>
-                    
-                    <p className="text-gray-800 line-clamp-2">{log.rationale}</p>
-                    
-                    <div className="flex items-center space-x-4 mt-3 text-xs text-gray-500">
-                      <div className="flex items-center">
-                        <Clock className="h-3 w-3 mr-1" />
-                        {formatTimestamp(log.created_at)}
-                      </div>
-                      {log.applied_rules && log.applied_rules.length > 0 && (
-                        <div className="flex items-center">
-                          <span className="mr-1">Rules:</span>
-                          <div className="flex flex-wrap gap-1">
-                            {log.applied_rules.slice(0, 2).map((rule, idx) => (
-                              <span key={idx} className="px-1.5 py-0.5 bg-gray-100 text-gray-700 rounded text-xs">
-                                {rule}
-                              </span>
-                            ))}
-                            {log.applied_rules.length > 2 && (
-                              <span className="px-1.5 py-0.5 bg-gray-100 text-gray-700 rounded text-xs">
-                                +{log.applied_rules.length - 2} more
-                              </span>
-                            )}
-                          </div>
+                filteredLogs.map((log) => (
+                  <React.Fragment key={log.id}>
+                    <tr className={`hover:bg-gray-50 transition-colors ${expandedLogId === log.id ? 'bg-blue-50/30' : ''}`}>
+                      <td className="px-6 py-4 whitespace-nowrap">
+                        <div className={`inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium border ${getDecisionColor(log.decision)}`}>
+                          {getDecisionIcon(log.decision)}
+                          <span className="ml-1.5">{log.decision}</span>
                         </div>
-                      )}
-                    </div>
-                  </div>
-                  
-                  <div className="ml-4">
-                    {expandedLogId === log.id ? (
-                      <ChevronUp className="h-5 w-5 text-gray-400" />
-                    ) : (
-                      <ChevronDown className="h-5 w-5 text-gray-400" />
-                    )}
-                  </div>
-                </div>
-              </div>
-              
-              {/* Expanded Details */}
-              {expandedLogId === log.id && (
-                <div className="px-4 pb-4 border-t border-gray-100 pt-4">
-                  <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                    {/* Rationale Details */}
-                    <div>
-                      <h4 className="text-sm font-medium text-gray-900 mb-2">Rationale</h4>
-                      <p className="text-sm text-gray-700 bg-gray-50 p-3 rounded-lg">
+                      </td>
+                      <td className="px-6 py-4 whitespace-nowrap text-sm font-medium text-gray-900">
+                        {log.source_agent}
+                      </td>
+                      <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">
+                        <code className="bg-gray-100 px-2 py-0.5 rounded text-xs">{log.target_tool}</code>
+                      </td>
+                      <td className="px-6 py-4 text-sm text-gray-500 max-w-xs truncate">
                         {log.rationale}
-                      </p>
-                    </div>
-                    
-                    {/* Metadata */}
-                    <div>
-                      <h4 className="text-sm font-medium text-gray-900 mb-2">Details</h4>
-                      <div className="space-y-2 text-sm">
-                        <div className="flex justify-between">
-                          <span className="text-gray-600">Action ID:</span>
-                          <code className="text-gray-900 bg-gray-100 px-2 py-1 rounded">
-                            {log.action_id.substring(0, 8)}...
-                          </code>
+                      </td>
+                      <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">
+                        <div className="flex items-center">
+                          <Clock className="h-3 w-3 mr-1.5 text-gray-400" />
+                          {formatTimestamp(log.created_at)}
                         </div>
-                        <div className="flex justify-between">
-                          <span className="text-gray-600">Timestamp:</span>
-                          <span className="text-gray-900">
-                            {new Date(log.created_at).toLocaleString()}
-                          </span>
-                        </div>
-                        {log.metadata && (
-                          <div>
-                            <span className="text-gray-600">Metadata:</span>
-                            <pre className="mt-1 text-xs bg-gray-50 p-2 rounded overflow-x-auto">
-                              {JSON.stringify(log.metadata, null, 2)}
-                            </pre>
+                      </td>
+                      <td className="px-6 py-4 whitespace-nowrap text-right text-sm font-medium">
+                        <button
+                          onClick={() => setExpandedLogId(expandedLogId === log.id ? null : log.id)}
+                          className="text-blue-600 hover:text-blue-900"
+                        >
+                          {expandedLogId === log.id ? <ChevronUp className="h-5 w-5" /> : <ChevronDown className="h-5 w-5" />}
+                        </button>
+                      </td>
+                    </tr>
+                    {expandedLogId === log.id && (
+                      <tr>
+                        <td colSpan="6" className="px-6 py-4 bg-gray-50 border-t border-b border-gray-200">
+                          <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                            <div>
+                              <h4 className="text-xs font-semibold text-gray-500 uppercase tracking-wider mb-2">Full Rationale</h4>
+                              <p className="text-sm text-gray-800 bg-white p-3 rounded border border-gray-200">
+                                {log.rationale}
+                              </p>
+                              
+                              {log.applied_rules && log.applied_rules.length > 0 && (
+                                <div className="mt-4">
+                                  <h4 className="text-xs font-semibold text-gray-500 uppercase tracking-wider mb-2">Applied Rules</h4>
+                                  <div className="flex flex-wrap gap-2">
+                                    {log.applied_rules.map((rule, idx) => (
+                                      <span key={idx} className="px-2 py-1 bg-blue-100 text-blue-800 rounded text-xs font-mono">
+                                        {rule}
+                                      </span>
+                                    ))}
+                                  </div>
+                                </div>
+                              )}
+                            </div>
+                            <div>
+                              <h4 className="text-xs font-semibold text-gray-500 uppercase tracking-wider mb-2">Tool Arguments</h4>
+                              <pre className="text-xs text-gray-800 bg-white p-3 rounded border border-gray-200 overflow-x-auto max-h-40">
+                                {JSON.stringify(log.metadata?.tool_arguments || log.metadata || {}, null, 2)}
+                              </pre>
+                              
+                              <div className="mt-4 grid grid-cols-2 gap-4">
+                                <div>
+                                  <h4 className="text-xs font-semibold text-gray-500 uppercase tracking-wider mb-1">Action ID</h4>
+                                  <p className="text-xs font-mono text-gray-600 truncate">{log.action_id}</p>
+                                </div>
+                                <div>
+                                  <h4 className="text-xs font-semibold text-gray-500 uppercase tracking-wider mb-1">Severity</h4>
+                                  <span className={`text-xs font-medium ${
+                                    log.severity === 'HIGH' ? 'text-red-600' : 
+                                    log.severity === 'MEDIUM' ? 'text-yellow-600' : 'text-blue-600'
+                                  }`}>
+                                    {log.severity || 'LOW'}
+                                  </span>
+                                </div>
+                              </div>
+                            </div>
                           </div>
-                        )}
-                      </div>
-                    </div>
-                    
-                    {/* Applied Rules */}
-                    {log.applied_rules && log.applied_rules.length > 0 && (
-                      <div className="md:col-span-2">
-                        <h4 className="text-sm font-medium text-gray-900 mb-2">Applied Rules</h4>
-                        <div className="flex flex-wrap gap-2">
-                          {log.applied_rules.map((rule, idx) => (
-                            <span
-                              key={idx}
-                              className="px-3 py-1.5 bg-blue-50 text-blue-700 rounded-lg text-sm font-medium"
-                            >
-                              {rule}
-                            </span>
-                          ))}
-                        </div>
-                      </div>
+                        </td>
+                      </tr>
                     )}
-                  </div>
-                  
-                  {/* JSON View */}
-                  <div className="mt-4">
-                    <details>
-                      <summary className="text-sm font-medium text-gray-900 cursor-pointer hover:text-blue-600">
-                        View Raw JSON
-                      </summary>
-                      <pre className="mt-2 text-xs bg-gray-900 text-gray-100 p-4 rounded-lg overflow-x-auto">
-                        {JSON.stringify(log, null, 2)}
-                      </pre>
-                    </details>
-                  </div>
-                </div>
+                  </React.Fragment>
+                ))
               )}
-            </div>
-          ))
-        )}
-      </div>
-      
-      {/* Load More */}
-      {filteredLogs.length > 0 && filteredLogs.length < auditLogs.length && (
-        <div className="text-center">
-          <button
-            onClick={() => fetchAuditLogs(auditLogs.length + 20)}
-            className="px-4 py-2 bg-gray-100 hover:bg-gray-200 text-gray-800 rounded-lg font-medium"
-          >
-            Load More
-          </button>
+            </tbody>
+          </table>
         </div>
-      )}
+      </div>
     </div>
   );
 };
