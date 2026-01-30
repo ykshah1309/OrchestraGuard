@@ -168,76 +168,106 @@ class DatabaseService:
         return response.data[0] if response.data else None
     
     async def check_policy_conflicts(self, new_rule: Dict) -> List[Dict]:
-        """Check for conflicts with existing policies"""
-        return await self._with_retry(self._check_policy_conflicts_internal, new_rule)
-    
-    async def _check_policy_conflicts_internal(self, new_rule: Dict) -> List[Dict]:
-        """FIXED: Improved conflict detection with regex overlap analysis"""
+        """FIXED: Use PostgreSQL function for conflict detection"""
         try:
-            target_regex = new_rule.get("target_tool_regex", "")
-            new_severity = new_rule.get("severity", "MEDIUM")
+            # Use the PostgreSQL stored procedure
+            response = self.supabase.rpc(
+                'check_policy_conflicts',
+                {
+                    'new_target_regex': new_rule.get("target_tool_regex", ""),
+                    'new_severity': new_rule.get("severity", "MEDIUM"),
+                    'new_action': new_rule.get("action_on_violation", "BLOCK")
+                }
+            ).execute()
             
-            # Get all active policies
-            active_policies = await self.get_active_policies()
-            conflicts = []
-            
-            for policy in active_policies:
-                policy_rules = policy.get("rules", {})
-                if isinstance(policy_rules, dict):
-                    existing_regex = policy_rules.get("target_tool_regex", "")
-                    existing_severity = policy_rules.get("severity", "MEDIUM")
-                    existing_action = policy_rules.get("action_on_violation", "BLOCK")
-                    
-                    # Check for potential regex overlap (simplified check)
-                    # In production, use a proper regex intersection library
-                    if self._regexes_might_overlap(target_regex, existing_regex):
-                        # Check for conflicting actions with same/similar targets
-                        if self._actions_conflict(new_rule.get("action_on_violation"), existing_action):
-                            conflicts.append({
-                                "policy_id": policy.get("id"),
-                                "policy_name": policy.get("name"),
-                                "rule_id": policy_rules.get("rule_id", "unknown"),
-                                "severity": existing_severity,
-                                "action": existing_action,
-                                "conflict_type": "action_conflict",
-                                "description": f"New rule targeting '{target_regex}' conflicts with existing rule '{policy_rules.get('rule_id')}' targeting '{existing_regex}'"
-                            })
-            
-            return conflicts
+            return response.data if response.data else []
             
         except Exception as e:
-            logger.error(f"Error checking policy conflicts: {e}")
-            return []
+            logger.error(f"Error calling PostgreSQL conflict function: {e}")
+            # Fall back to Python implementation
+            return await self._python_fallback_conflict_check(new_rule)
     
-    def _regexes_might_overlap(self, regex1: str, regex2: str) -> bool:
+    async def _python_fallback_conflict_check(self, new_rule: Dict) -> List[Dict]:
+        """Fallback Python implementation for conflict detection"""
+        conflicts = []
+        target_regex = new_rule.get("target_tool_regex", "")
+        new_severity = new_rule.get("severity", "MEDIUM")
+        new_action = new_rule.get("action_on_violation", "BLOCK")
+        
+        # Get all active policies
+        active_policies = await self.get_active_policies()
+        
+        for policy in active_policies:
+            policy_rules = policy.get("rules", {})
+            
+            if isinstance(policy_rules, dict):
+                existing_regex = policy_rules.get("target_tool_regex", "")
+                existing_action = policy_rules.get("action_on_violation", "BLOCK")
+                
+                # Improved regex overlap detection
+                if self._regexes_overlap_improved(target_regex, existing_regex):
+                    if self._actions_conflict(new_action, existing_action):
+                        conflicts.append({
+                            "policy_id": policy.get("id"),
+                            "policy_name": policy.get("name", "Unnamed"),
+                            "rule_id": policy_rules.get("rule_id", "unknown"),
+                            "severity": policy_rules.get("severity", "MEDIUM"),
+                            "action": existing_action,
+                            "conflict_type": "action_conflict",
+                            "description": f"New rule '{new_rule.get('rule_id', 'unknown')}' conflicts with existing rule '{policy_rules.get('rule_id', 'unknown')}'"
+                        })
+        
+        return conflicts
+    
+    def _regexes_overlap_improved(self, regex1: str, regex2: str) -> bool:
         """
-        Simplified regex overlap detection
-        In production, use a proper regex intersection library like `regex` or `sre_yield`
+        Improved regex overlap detection
+        TODO: In production, replace with a proper regex intersection library
         """
-        # Simple cases for common patterns
+        # Simple cases
         if regex1 == regex2:
             return True
         
-        # Check if one is a subset pattern of the other
+        # Check if one pattern is contained in the other
         if regex1 in regex2 or regex2 in regex1:
             return True
         
-        # Check for wildcard patterns
-        if ".*" in regex1 and ".*" in regex2:
-            # Both have wildcards - assume potential overlap
-            return True
+        # Check for common patterns
+        patterns_to_check = [
+            (r'\*', '.*'),
+            (r'\.\*', '.*'),
+            ('Slack', 'Slack'),
+            ('GitHub', 'GitHub'),
+            ('SQL', 'SQL'),
+            ('API', 'API')
+        ]
         
-        # For now, return True to be safe - in production, implement proper regex intersection
-        # This is a major area for improvement
+        for pattern1, pattern2 in patterns_to_check:
+            if pattern1 in regex1 and pattern2 in regex2:
+                return True
+        
+        # Check for wildcard patterns that might overlap
+        if '.*' in regex1 or '.*' in regex2:
+            # Extract base patterns before wildcard
+            base1 = regex1.split('.*')[0] if '.*' in regex1 else regex1
+            base2 = regex2.split('.*')[0] if '.*' in regex2 else regex2
+            
+            if base1 in base2 or base2 in base1:
+                return True
+        
+        # Conservative approach: assume overlap for safety
+        # This prevents missing potential conflicts
+        # TODO: Log this as needing manual review
+        logger.warning(f"Regex overlap detection uncertain: '{regex1}' vs '{regex2}'. Assuming overlap for safety.")
         return True
     
     def _actions_conflict(self, action1: str, action2: str) -> bool:
         """Check if two actions conflict"""
-        # BLOCK and ALLOW definitely conflict
+        # BLOCK vs ALLOW is a definite conflict
         if (action1 == "BLOCK" and action2 == "ALLOW") or (action1 == "ALLOW" and action2 == "BLOCK"):
             return True
         
-        # FLAG and ALLOW might conflict depending on severity
+        # FLAG vs ALLOW might be a conflict depending on business rules
         # For now, be conservative
         if (action1 == "FLAG" and action2 == "ALLOW") or (action1 == "ALLOW" and action2 == "FLAG"):
             return True

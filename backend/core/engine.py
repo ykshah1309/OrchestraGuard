@@ -7,6 +7,7 @@ import json
 import re
 from typing import Dict, Any, List, Optional
 from datetime import datetime
+import hashlib
 from collections import defaultdict
 import logging
 
@@ -32,6 +33,7 @@ class ReasoningEngine:
     1. Proper policy parsing from database
     2. Complete LLM retry logic
     3. Immediate notification on BLOCK decisions
+    4. Improved applied rules logic and JSON parsing
     """
 
     def __init__(self):
@@ -52,22 +54,25 @@ class ReasoningEngine:
             "flag": 0,
         }
 
-        # Master System Prompt
+        # Master System Prompt with strict applied rules requirement
         self.master_prompt = """You are the Ethical Reasoner for OrchestraGuard. Your job is to evaluate intercepted agent actions against enterprise policies.
 
 CRITICAL RULES:
-1. NEVER allow an action that violates a rule in the EPKB.
-2. NEVER use external knowledge or common sense; rely only on the EPKB rule.
-3. ALWAYS provide a clear rationale for your decision.
-4. PRIORITY: Security and Compliance override Efficiency. When in doubt, Block.
-5. OUTPUT FORMAT: Your final response MUST be a single, valid JSON object.
+1. **NEVER** allow an action that violates a rule in the EPKB.
+2. **NEVER** use external knowledge or common sense; rely only on the EPKB rule.
+3. **MUST SPECIFY APPLIED RULES**: You MUST explicitly list which rules were applied in your decision.
+4. **PRIORITY**: Security and Compliance override Efficiency. When in doubt, Block.
+5. **OUTPUT FORMAT**: Your final response MUST be a single, valid JSON object.
 
 CORE LOGIC FLOW:
-1. RECEIVE INTERCEPTION: Analyze the intercepted action JSON.
-2. RETRIEVE POLICY: Apply relevant policy rules for the target_tool.
-3. REASON & EVALUATE: Compare tool_arguments and user_context against rules.
-4. DECIDE: Determine if action is compliant (ALLOW/BLOCK/FLAG).
-5. LOG: Record decision with rationale and severity.
+1. **RECEIVE INTERCEPTION**: Analyze the intercepted action JSON.
+2. **RETRIEVE POLICY**: Apply relevant policy rules for the target_tool.
+3. **REASON & EVALUATE**: Compare tool_arguments and user_context against rules.
+4. **DECIDE**: Determine if action is compliant (ALLOW/BLOCK/FLAG).
+5. **SPECIFY RULES**: List the specific rule IDs that were applied.
+6. **LOG**: Record decision with rationale and severity.
+
+IMPORTANT: If the action is ALLOWED, you must still specify which rules were evaluated (even if none were violated).
 
 POLICY RULES TO APPLY:
 {policy_rules}
@@ -77,10 +82,8 @@ OUTPUT JSON FORMAT:
   "decision": "ALLOW|BLOCK|FLAG",
   "rationale": "concise explanation of why this decision was made",
   "severity": "HIGH|MEDIUM|LOW|null",
-  "applied_rules": ["rule_id_1", "rule_id_2"]
-}}
-
-Remember: When a rule is violated, you MUST set decision to the rule's action_on_violation."""
+  "applied_rules": ["rule_id_1", "rule_id_2"]  // LIST OF SPECIFIC RULE IDs THAT WERE APPLIED
+}}"""
 
     async def initialize(self) -> None:
         """Initialize engine with dependencies and load policies."""
@@ -313,35 +316,27 @@ Remember: When a rule is violated, you MUST set decision to the rule's action_on
         action: InterceptedAction,
         relevant_rules: List[Dict],
     ) -> Decision:
-        """Parse and validate LLM response with comprehensive error handling."""
+        """
+        FIXED: Improved LLM response parsing with better applied rules logic
+        """
         try:
-            # Try to parse JSON
             content = llm_response.content.strip()
 
-            # Clean up markdown code blocks if present
-            if content.startswith("```json"):
-                content = content[7:]
-            elif content.startswith("```"):
-                content = content[3:]
+            # Try to extract JSON using improved heuristics
+            json_content = self._extract_json_from_response(content)
 
-            if content.endswith("```"):
-                content = content[:-3]
+            if not json_content:
+                logger.error(f"Could not extract JSON from LLM response: {content[:200]}...")
+                raise ValueError("No JSON found in LLM response")
 
-            content = content.strip()
-
-            decision_data = json.loads(content)
+            decision_data = json.loads(json_content)
 
             # Validate decision format
             if not self._validate_decision_format(decision_data):
                 raise ValueError("Invalid decision format from LLM")
 
-            # Extract applied rules
-            applied_rules = decision_data.get("applied_rules", [])
-            if not applied_rules:
-                # Try to infer from relevant rules if LLM didn't specify
-                applied_rules = [
-                    rule_entry["rule"].rule_id for rule_entry in relevant_rules
-                ]
+            # FIXED: Improved applied rules logic
+            applied_rules = self._determine_applied_rules(decision_data, relevant_rules)
 
             # Parse severity
             severity = None
@@ -349,75 +344,181 @@ Remember: When a rule is violated, you MUST set decision to the rule's action_on
                 try:
                     severity = SeverityEnum(decision_data["severity"].upper())
                 except ValueError:
-                    logger.warning(
-                        f"Invalid severity value: {decision_data['severity']}"
-                    )
+                    logger.warning(f"Invalid severity value: {decision_data['severity']}")
 
             decision = Decision(
                 action_id=action.action_id,
                 source_agent=action.source_agent,
                 target_tool=action.target_tool,
                 decision=DecisionEnum(decision_data["decision"].upper()),
-                rationale=decision_data["rationale"][:1000],  # Truncate if too long
+                rationale=decision_data["rationale"][:1000],
                 severity=severity,
                 applied_rules=applied_rules,
-                timestamp=datetime.utcnow(),
+                timestamp=datetime.utcnow()
             )
 
-            logger.debug(
-                f"Parsed decision: {decision.decision} with {len(applied_rules)} applied rules"
-            )
             return decision
 
         except json.JSONDecodeError as e:
-            logger.error(f"LLM output is not valid JSON: {e}")
-            logger.error(f"LLM output was: {llm_response.content}")
-
-            # Try to extract JSON from malformed response
-            json_match = re.search(r"\{.*\}", llm_response.content, re.DOTALL)
-            if json_match:
-                try:
-                    decision_data = json.loads(json_match.group())
-                    if self._validate_decision_format(decision_data):
-                        # Use the extracted JSON
-                        return self._parse_llm_response(
-                            LLMResponse(
-                                content=json.dumps(decision_data),
-                                tool_calls=None,
-                                finish_reason=None,
-                            ),
-                            action,
-                            relevant_rules,
-                        )
-                except:
-                    pass
-
-            # Default to BLOCK for safety
-            return Decision(
-                action_id=action.action_id,
-                source_agent=action.source_agent,
-                target_tool=action.target_tool,
-                decision=DecisionEnum.BLOCK,
-                rationale=f"Failed to parse LLM response as JSON: {str(e)}",
-                severity=SeverityEnum.HIGH,
-                applied_rules=["PARSE-ERROR"],
-                timestamp=datetime.utcnow(),
-            )
+            logger.error(f"JSON decode error: {e}")
+            return self._create_error_decision(action, f"JSON parsing error: {str(e)}")
         except (KeyError, ValueError) as e:
-            logger.error(f"LLM output parsing failed: {e}")
-            logger.error(f"LLM output was: {llm_response.content}")
+            logger.error(f"LLM output validation failed: {e}")
+            return self._create_error_decision(action, f"LLM output validation failed: {str(e)}")
 
-            # Default to BLOCK for safety
-            return Decision(
-                action_id=action.action_id,
-                source_agent=action.source_agent,
-                target_tool=action.target_tool,
-                decision=DecisionEnum.BLOCK,
-                rationale=f"LLM output validation failed: {str(e)}",
-                severity=SeverityEnum.HIGH,
-                applied_rules=["VALIDATION-ERROR"],
-                timestamp=datetime.utcnow(),
-            )
+    def _extract_json_from_response(self, content: str) -> Optional[str]:
+        """
+        FIXED: Improved JSON extraction with multiple strategies
+        """
+        strategies = [
+            # Strategy 1: Look for complete JSON object
+            lambda: self._extract_complete_json(content),
+            # Strategy 2: Look for JSON between markers
+            lambda: self._extract_json_between_markers(content, "```json", "```"),
+            lambda: self._extract_json_between_markers(content, "```", "```"),
+            # Strategy 3: Look for JSON after key phrases
+            lambda: self._extract_json_after_phrase(content, "Output:"),
+            lambda: self._extract_json_after_phrase(content, "Decision:"),
+            # Strategy 4: Try to find any JSON-like structure
+            lambda: self._find_json_like_structure(content)
+        ]
+
+        for strategy in strategies:
+            result = strategy()
+            if result:
+                logger.debug(f"Successfully extracted JSON using strategy: {strategy.__name__}")
+                return result
+
+        return None
+
+    def _extract_complete_json(self, content: str) -> Optional[str]:
+        """Extract a complete JSON object from content"""
+        # Look for JSON object at the beginning
+        if content.startswith('{'):
+            # Find matching closing brace
+            stack = []
+            for i, char in enumerate(content):
+                if char == '{':
+                    stack.append('{')
+                elif char == '}':
+                    if stack:
+                        stack.pop()
+                        if not stack:
+                            return content[:i+1]
+        return None
+
+    def _extract_json_between_markers(self, content: str, start_marker: str, end_marker: str) -> Optional[str]:
+        """Extract JSON between markers"""
+        start_idx = content.find(start_marker)
+        if start_idx == -1:
+            return None
+
+        start_idx += len(start_marker)
+        end_idx = content.find(end_marker, start_idx)
+
+        if end_idx == -1:
+            return None
+
+        return content[start_idx:end_idx].strip()
+
+    def _extract_json_after_phrase(self, content: str, phrase: str) -> Optional[str]:
+        """Extract JSON after a specific phrase"""
+        phrase_idx = content.find(phrase)
+        if phrase_idx == -1:
+            return None
+
+        # Look for JSON after the phrase
+        substr = content[phrase_idx + len(phrase):]
+        return self._extract_complete_json(substr.strip())
+
+    def _find_json_like_structure(self, content: str) -> Optional[str]:
+        """Find JSON-like structure using regex"""
+        # Look for something that looks like a JSON object
+        pattern = r'\{[^{}]*\{[^{}]*\}[^{}]*\}|\{[^{}]*\}'
+        matches = re.findall(pattern, content, re.DOTALL)
+
+        for match in matches:
+            try:
+                json.loads(match)
+                return match
+            except json.JSONDecodeError:
+                continue
+
+        return None
+
+    def _determine_applied_rules(
+        self,
+        decision_data: Dict,
+        relevant_rules: List[Dict]
+    ) -> List[str]:
+        """
+        FIXED: Intelligent applied rules determination
+        """
+        # If LLM provided applied_rules, use them
+        if "applied_rules" in decision_data and isinstance(decision_data["applied_rules"], list):
+            provided_rules = [str(rule).upper() for rule in decision_data["applied_rules"]]
+
+            # Validate that provided rules exist in relevant rules
+            relevant_rule_ids = [rule_entry["rule"].rule_id for rule_entry in relevant_rules]
+            valid_rules = [rule for rule in provided_rules if rule in relevant_rule_ids]
+
+            if valid_rules:
+                logger.info(f"LLM provided applied rules: {valid_rules}")
+                return valid_rules
+            else:
+                logger.warning("LLM provided applied rules, but none matched relevant rules")
+
+        # Determine applied rules based on decision
+        decision = decision_data.get("decision", "").upper()
+
+        if decision == "ALLOW":
+            # For ALLOW decisions, include rules that were evaluated but not violated
+            # This is less critical, so we can be conservative
+            rule_ids = [rule_entry["rule"].rule_id for rule_entry in relevant_rules]
+            if rule_ids:
+                logger.info(f"ALLOW decision: including evaluated rules: {rule_ids}")
+                return rule_ids
+            else:
+                return []
+
+        elif decision in ["BLOCK", "FLAG"]:
+            # For BLOCK/FLAG decisions, we need to identify which rules were violated
+            rationale = decision_data.get("rationale", "").lower()
+            applied_rules = []
+
+            # Try to extract rule IDs from rationale
+            for rule_entry in relevant_rules:
+                rule_id = rule_entry["rule"].rule_id
+                # Check if rule ID is mentioned in rationale
+                if rule_id.lower() in rationale or rule_entry["rule"].description.lower() in rationale:
+                    applied_rules.append(rule_id)
+
+            # If no rules found in rationale, use all relevant rules as fallback
+            if not applied_rules:
+                logger.warning(f"{decision} decision: no rules found in rationale, using all relevant rules")
+                applied_rules = [rule_entry["rule"].rule_id for rule_entry in relevant_rules]
+
+            logger.info(f"{decision} decision: determined applied rules: {applied_rules}")
+            return applied_rules
+
+        else:
+            logger.error(f"Unknown decision type: {decision}")
+            return []
+
+    def _create_error_decision(self, action: InterceptedAction, error_message: str) -> Decision:
+        """Create an error decision when parsing fails"""
+        logger.error(f"Creating error decision: {error_message}")
+
+        return Decision(
+            action_id=action.action_id,
+            source_agent=action.source_agent,
+            target_tool=action.target_tool,
+            decision=DecisionEnum.BLOCK,
+            rationale=f"System error: {error_message}",
+            severity=SeverityEnum.HIGH,
+            applied_rules=["SYSTEM-ERROR"],
+            timestamp=datetime.utcnow()
+        )
 
     def _validate_decision_format(self, data: dict) -> bool:
         """Validate LLM decision output format."""

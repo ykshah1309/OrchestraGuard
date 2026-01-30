@@ -35,3 +35,13 @@ migrations/
 *.db
 # Docker
 .dockerignore
+
+# --- Infrastructure Data ---
+models/
+grafana/
+prometheus-data/
+redis-data/
+postgres-data/
+
+# --- Logs ---
+*.log
