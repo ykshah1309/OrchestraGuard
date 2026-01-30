@@ -4,9 +4,9 @@
 import React, { useEffect, useState } from 'react';
 import { BarChart3, Shield, AlertTriangle, CheckCircle, Zap, Users, Database, Settings } from 'lucide-react';
 import useStore from '../store/useStore';
-import AuditStream from './AuditStream';
-import PolicyCreator from './PolicyCreator';
-import MetricsCard from './MetricsCard';
+import AuditStream from '../components/AuditStream';
+import PolicyCreator from '../components/PolicyCreator';
+import MetricsCard from '../components/MetricsCard';
 
 const Dashboard = () => {
   const {
